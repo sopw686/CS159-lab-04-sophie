@@ -13,8 +13,13 @@ import read_tags
 
 class HMMTagger():
 
-    def __init__(self, nlp, alpha=0.1):
-        self.tags = ["<<START>>",] + read_tags.ptb_tag_set
+    def __init__(self, nlp, alpha=0.1, do_universal=False, vocab_size=None):
+        self.do_universal = do_universal
+        self.vocab_size = vocab_size
+        
+        tag_set = read_tags.universal_tag_set if do_universal else read_tags.ptb_tag_set
+        #self.tags = ["<<START>>",] + read_tags.ptb_tag_set
+        self.tags = ["<<START>>",] + tag_set
         self.vocab = ["<<OOV>>",]
         self.alpha = alpha
 
@@ -35,9 +40,14 @@ class HMMTagger():
         """Given a directory of files, populate the vocabulary that corresponds
         to all tokens in the files in the directory."""
         token_counter = Counter()
-        for words, _ in read_tags.parse_dir(train_dir): 
+        for words, _ in read_tags.parse_dir(train_dir):
             token_counter.update([w.lower() for w in words])
-        self.vocab += list(token_counter.keys())
+
+        if self.vocab_size is None:
+            self.vocab += list(token_counter.keys())
+        else:
+            # most_common(n) returns (word, count) pairs sorted by frequency
+            self.vocab += [w for w, _ in token_counter.most_common(self.vocab_size)]
     
     def normalize_probabilities(self):
         """Normalize the tag-word and tag-tag probability matrices
@@ -53,19 +63,25 @@ class HMMTagger():
     ## BEGIN DOCUMENTATION HERE ###
 
     def get_start_costs(self):
-        """TODO: docstring"""
+        """Return the log probabilities of each tag starting a sentence
+        (the <<START>> row of the transition matrix)."""
         return self.tag_tag_probs[self.tag_to_index("<<START>>"),:]
 
     def get_token_costs(self, token):
-        """TODO: docstring"""
+        """Return the log probability of each tag emitting this token
+        (unknown words use <<OOV>>)."""
+
         return self.tag_word_probs[:,self.word_to_index(token.text)]
     
     def normalize(self, m):
-        """TODO: docstring"""
+        """Turn a matrix of counts into log probabilities by dividing
+        each row by its sum"""
         return (log(m).transpose() - log(m.sum(axis=1))).transpose()
 
     def do_train_sent(self, words, tags): 
-        """TODO: docstring"""
+        """Add one sentence's emission and transition counts to the
+        count matrices."""
+
         prev_tag = self.tag_to_index("<<START>>")
         for word, tag in zip(words, tags):
             t_i = self.tag_to_index(tag)
@@ -75,7 +91,9 @@ class HMMTagger():
             prev_tag = t_i
 
     def train(self, train_dir):
-        """TODO: docstring"""
+        """Build the vocab, count emissions and transitions over all
+        training files (starting from alpha for smoothing), then
+        convert the counts to log probabilities."""
         self.update_vocab(train_dir)
 
         # TODO: which of these gives transition probabilities,
@@ -83,12 +101,13 @@ class HMMTagger():
         self.tag_word  = ones((len(self.tags), len(self.vocab))) * self.alpha
         self.tag_tag =  ones((len(self.tags), len(self.tags))) * self.alpha
 
-        for words, tags in read_tags.parse_dir(train_dir):
+        for words, tags in read_tags.parse_dir(train_dir, do_universal=self.do_universal):
             self.do_train_sent(words, tags)
         self.normalize_probabilities()
 
     def predict(self, tokens):
-        """TODO: docstring"""
+        """Use Viterbi to find the most likely tag sequence and set
+        each token's tag_ in place."""
         # Build DP table, which should be |sent| x |tags|
         cost_table = zeros((len(tokens), len(self.tags)), float32)
         bt_table   = zeros((len(tokens), len(self.tags)), int)
@@ -99,12 +118,11 @@ class HMMTagger():
                 cost_table[token_i, :] = self.get_start_costs() + token_costs
                 bt_table[token_i, :] = -1
             else:
-                costs = self.tag_tag_probs.copy()
-                # TODO: Fill in the actual costs matrix to compute
-                # the sum of the log probability from the last state,
-                # the transition log probability,
-                # and the emission log probability
-                
+                # costs = self.tag_tag_probs.copy()
+                costs = self.tag_tag_probs.copy()            # costs[j', j] = log A[j', j]
+                costs += cost_table[token_i - 1, :].reshape(-1, 1)  # + D[j', i-1], previous scores down the rows (j')
+                costs += token_costs                         # + log B[j, w_i], emissions across the columns (j)
+
                 cost_table[token_i, :] = costs.max(axis=0)
                 bt_table[token_i,:] = costs.argmax(axis=0)
 
@@ -115,7 +133,8 @@ class HMMTagger():
         self.backtrace(bt_table, tokens, best_last_tag)
 
     def backtrace(self, bt_table, tokens, best_last_tag):
-        """TODO: docstring"""
+        """Follow the backpointers from the last token to the first,
+        assigning each token its best tag."""
         current_row = len(tokens)-1
         for t in list(tokens)[::-1]:
             t.tag_ = self.tags[best_last_tag]
@@ -125,9 +144,13 @@ class HMMTagger():
 
 def main(args):
     nlp = spacy.load("en_core_web_sm")
-    tagger = HMMTagger(nlp, alpha=args.alpha)
+    tagger = HMMTagger(nlp, alpha=args.alpha, do_universal=args.universal,
+                    vocab_size=args.vocabsize)
+
     tagger.train(args.dir)
     pickle.dump(tagger, args.output)
+
+    # tagger = HMMTagger(nlp, alpha=args.alpha, do_universal=args.universal)
 
 
 if __name__ == "__main__": 
@@ -139,6 +162,10 @@ if __name__ == "__main__":
                         help="Save output to FILE")
     parser.add_argument("--alpha", "-a", default=0.1, 
                         help="Alpha value for add-alpha smoothing")
+    parser.add_argument("--universal", action="store_true",
+                        help="Use Universal Dependencies tags instead of Penn TreeBank")
+    parser.add_argument("--vocabsize", "-v", type=int, default=None,
+                        help="Keep only the N most frequent words (default: keep all)")
 
     args = parser.parse_args()
     main(args)

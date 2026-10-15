@@ -21,13 +21,21 @@ def main(args):
     
     total_right = 0
     total_size = 0 
-    for words, tags in parse_dir(args.dir): 
+    # for words, tags in parse_dir(args.dir): 
+    for words, tags in parse_dir(args.dir, do_universal=args.universal):
         doc = Doc(nlp.vocab, words=list(words))
         tagger(doc)
+
+        if args.universal and not getattr(tagger, "do_universal", False):
+            for token in doc:
+                token.tag_ = ptb_to_universal.get(token.tag_, token.tag_)
         total_right += sum([spacy_token.tag_ == ref_tag 
                        for spacy_token, ref_tag in zip(doc, tags)])
         total_size += len(doc)
 
+        # debugginng tag issues
+        # print(list(tags)[:5], [t.tag_ for t in doc][:5])
+        # break
     print("Accuracy: {:.2%}".format(total_right/total_size))
 
 
@@ -38,6 +46,9 @@ if __name__ == "__main__":
     parser.add_argument("--hmm", metavar="FILE", 
                         type=argparse.FileType('rb'), required=True,
                         help="Read hmm model from FILE")
+    parser.add_argument("--universal", action="store_true",
+                        help="Evaluate against Universal Dependencies tags")
+
     args = parser.parse_args()
     main(args)
  
